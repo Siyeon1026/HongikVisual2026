@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>Graduation Exhibit - Camera Interaction</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden}
+  canvas{display:block}
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+</head>
+<body>
+<video id="cam" playsinline muted autoplay style="display:none"></video>
+
+<script type="module">
+import { FaceLandmarker, HandLandmarker, FilesetResolver }
+  from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+/* ====================== 설정 (여기만 만지면 됨) ====================== */
+const W = 5120, H = 2880;            // 전시 화면 기준 좌표계 (iMac 5K)
+const BG_W = 9000, BG_H = 5000;      // 백그라운드 이미지 크기
+const MAX_X = (BG_W - W) / 2;        // 좌우 최대 이동량 (1940)
+const MAX_Y = (BG_H - H) / 2;        // 상하 최대 이동량 (1060)
+
+// ---- 공통 ----
+const BTN_MARGIN = 80;               // 버튼 "근처"로 인정할 여유 범위
+const HOLD_MS = 1000;                // 손가락이 버튼 안에 이 시간(ms) 머물면 클릭 처리
+const COOLDOWN_MS = 1500;            // 연속 클릭 방지
+const UI_DELAY = 1500;               // 화면이 뜬 뒤 UI가 나타나기까지 대기(ms)
+const UI_FADE = 900;                 // UI 서서히 나타나는 시간
+const SWITCH_DELAY = 250;            // UI 교체 시 새 UI 대기
+const UI_FADE_OUT = 350;             // 이전 UI 사라지는 시간
+
+// ---- S1: UI(SVG) 위치 = 아래 160 / 왼쪽 200 여백 (SVG 높이에 맞춰 자동 계산) ----
+const UI_X = 200, UI_BOTTOM = 160;
+// 손가락 인식 영역 = SVG 안 버튼 위치 (SVG 좌표). [0]=전체보기, [1]=지갑 찾기
+const HITS = [ { x: 1047, y: 53, w: 341, h: 144 }, { x: 66, y: 892, w: 756, h: 144 } ];
+
+// ---- S2: 지갑 (배경 9000x5000 좌표, 중심 기준) + 초록 표시 박스 ----
+const WALLET = { x: 5693, y: 3073, w: 620, h: 340 };
+const WALLET_MARGIN = 60;            // 박스 바깥 여유
+const S2_AUTO_MS = 10000;            // 손이 인식 안 돼도 이 시간(ms) 지나면 다음으로
+const ARROW_TIP_X = 533, ARROW_BOTTOM = 258, ARROW_GAP = 80;   // S2_1.svg 안 화살표 위치(SVG 좌표)
+
+// ---- S3: 길 안내 ----
+const S3_TOP = 160, S3_RIGHT = 200;  // S3_2(상단 중앙), S3_3(상단 오른쪽) 여백
+const S3_GO = { x: 1006, y: 53, w: 341, h: 144 };   // S3_1.svg 안 초록 "안내 시작" 버튼 영역
+const S3_GO_REF_W = 1413;            // 위 좌표의 기준 가로 크기 (S3_1.svg 가로)
+// 길안내: 사진의 원근(소실점)에 맞춰 코드로 그림. 좌표는 배경(9000x5000) 기준
+const VP = { x: 4400, y: 2446 };     // 소실점 (인도가 모이는 지점 = 지평선 높이)
+const PATH = { bx: 4560, by: 4000,   // 길 아래쪽 중심 (화면 밑 바깥)
+               wb: 520,              // 아래쪽 폭
+               endY: 2560 };         // 길 끝 높이 (작을수록 멀리, 소실점 2446에 가까울수록 멀리)
+const PATH_RGB = "79,211,34";        // 초록색
+const PATH_ALPHA = 0.55;             // 진하기
+const PATH_START = 700;              // 안내 시작 후 길안내가 나타나기까지(ms)
+const PATH_REVEAL = 2400;            // 아래에서 위로 스르륵 나타나는 시간(ms)
+const WALK_STEPS = 8, STEP_MS = 900; // 걸음 수 / 한 걸음 시간
+const WALK_BOB = 45;                 // 위아래 흔들림 크기
+const WALK_ZOOM = 0.16;              // 걷는 동안 위쪽이 잘려 나가는 정도 (0.16 = 16% 확대)
+const WALK_BEGIN = PATH_START + PATH_REVEAL + 300;
+
+// ---- S4: 도어락 (SVG 3장, 하단 160 / 왼쪽 200 여백) ----
+const S4_X = 200;
+const S4_HITS = [ { x: 1047, y: 53, w: 341, h: 144 },    // S4_1 초록 버튼
+                  { x: 177, y: 358, w: 446, h: 144 },    // S4_2 초록 버튼 (아래 큰 버튼)
+                  { x: 849, y: 57, w: 341, h: 144 } ];   // S4_3 초록 버튼
+const S4_WAIT_MS = 2500;             // S4_3 버튼 누른 뒤 다음 장면까지 잠시 대기
+
+// ---- S5: 요리 (S5_1 상단 160 / 왼쪽 200, S5_2·S5_3은 그 아래 간격 30) ----
+const S5_X = 200, S5_TOP = 160, S5_GAP = 30;
+const S5_HITS = [ { x: 12, y: 12, w: 562, h: 144 },      // S5_2 초록 버튼
+                  { x: 66, y: 892, w: 756, h: 144 } ];   // S5_3 초록 버튼 → 첫 화면으로
+// S5 끝 → 첫 화면: 잠시 머문 뒤 → 서서히 어두워짐 → 첫 화면으로 서서히 밝아짐
+const END_PAUSE = 2500;              // 마지막 버튼 누른 뒤 대기(ms)
+const END_FADE_OUT = 1500;           // 페이드아웃(ms)
+const END_FADE_IN = 1500;            // 첫 화면 페이드인(ms)
+
+// ---- 고개 → 화면 이동 ----
+const YAW_RANGE = 0.15;              // 고개를 좌우로 이 정도 돌리면 끝까지 이동 (작을수록 민감)
+const PITCH_RANGE = 0.09;            // 상하 민감도
+const DEADZONE = 0.012;              // 미세한 떨림 무시
+const SMOOTH = 0.12;                 // 0~1, 클수록 빠르게 따라감
+const INVERT_X = false;              // 방향이 반대로 느껴지면 true
+const INVERT_Y = false;
+
+// ---- 안경 판별 (휴리스틱) — [ ] 키로 임계값 조정 ----
+let GLASSES_ON = 1.6;                // 이 점수 이상이면 "안경 씀"
+const GLASSES_OFF_RATIO = 0.8;       // 켜진 뒤엔 ON*0.8 아래로 떨어져야 해제
+// ---- 뒤에 지나가는 사람 무시 ----
+const MIN_FACE = 0.16;               // 얼굴 가로폭이 카메라 화면의 이 비율보다 작으면(=멀리 있으면) 무시. 클수록 가까운 사람만
+const MIN_HAND_RATIO = 0.35;         // 손 크기 ÷ 얼굴 크기가 이보다 작으면(=멀리 있는 사람 손) 무시
+const SHOW_DEBUG_AT_START = true;    // 우측 하단 카메라 미리보기 (d 키로 켜기/끄기)
+/* ==================================================================== */
+
+const video = document.getElementById("cam");
+const off = document.createElement("canvas");
+const octx = off.getContext("2d", { willReadFrequently: true });
+let faceLm, handLm, ready = false, status = "카메라 및 모델 로딩 중...";
+let vw = 1280, vh = 720, lastT = -1;
+
+// 상태
+let stage = 0;                       // 0: S1, 1: S2, 2: S3, 3: S4, 4: S5 (끝나면 S1로)
+let debug = SHOW_DEBUG_AT_START;
+let msgA = 1;                        // 대기 문구 투명도(서서히 나타남/사라짐)
+let gScore = 0, gActive = false, forceGlasses = false;
+let headX = 0, headY = 0;            // 오른쪽/위로 고개 돌리면 +
+let yawBase = 0, pitchBase = 0.58, lastYaw = 0, lastPitch = 0.58;
+let viewX = 0, viewY = 0;
+let lastFace = null;                 // 지금 따라가고 있는 사람 얼굴 위치(0~1)
+let fingers = [];                    // 화면 좌표(5120x2880)의 검지 끝
+let holdStart = 0, lastClick = -1e9, inside = false;
+let bgImg, ui = [], uiStep = 0, uiStart = 0, prevStep = -1, prevStart = 0, sceneStart = 0;
+let s2Img, arrowImg, s2Start = 0;
+let s3Img, s3ui = [], s3Step = 0, s3Start = 0, s3T0 = 0;
+let s4Img, s4ui = [], s4Step = 0, s4Start = 0, s4StepStart = 0, s4Prev = -1, s4PrevStart = 0, s4Done = 0;
+let s5Img, s5ui = [], s5Step = 0, s5Start = 0, s5StepStart = 0, s5PrevStart = -1, s5End = 0, fadeInStart = 0;
+
+/* ---------------- 초기화 ---------------- */
+async function init() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 1280, height: 720, facingMode: "user" }, audio: false });
+    video.srcObject = stream;
+    await video.play();
+    vw = video.videoWidth; vh = video.videoHeight;
+    off.width = vw; off.height = vh;
+
+    const fileset = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+    const make = async (delegate) => {
+      faceLm = await FaceLandmarker.createFromOptions(fileset, {
+        baseOptions: { modelAssetPath:
+          "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+          delegate }, runningMode: "VIDEO", numFaces: 3 });
+      handLm = await HandLandmarker.createFromOptions(fileset, {
+        baseOptions: { modelAssetPath:
+          "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+          delegate }, runningMode: "VIDEO", numHands: 2 });
+    };
+    try { await make("GPU"); } catch (e) { console.warn("GPU 실패, CPU 사용", e); await make("CPU"); }
+    ready = true; status = "";
+  } catch (e) {
+    console.error(e); status = "초기화 실패: " + e.message;
+  }
+}
+
+/* ---------------- 안경 판별 ---------------- */
+// 영역의 평균 에지(밝기 변화) 세기
+function edge(cx, cy, w, h) {
+  let x0 = Math.round(cx - w / 2), y0 = Math.round(cy - h / 2);
+  w = Math.round(w); h = Math.round(h);
+  x0 = Math.max(0, Math.min(vw - w - 1, x0)); y0 = Math.max(0, Math.min(vh - h - 1, y0));
+  if (w < 4 || h < 4) return 0;
+  const d = octx.getImageData(x0, y0, w, h).data;
+  const g = (i) => 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+  let sum = 0, n = 0;
+  for (let y = 0; y < h - 1; y++) for (let x = 0; x < w - 1; x++) {
+    const i = (y * w + x) * 4;
+    const v = g(i);
+    sum += Math.abs(g(i + 4) - v) + Math.abs(g(i + w * 4) - v); n++;
+  }
+  return sum / n;
+}
+
+// 코 다리·관자놀이·눈 아래 테두리(안경테가 지나가는 곳)의 에지 ÷ 볼(기준) 에지
+function glassesScore(lm) {
+  const P = (i) => ({ x: lm[i].x * vw, y: lm[i].y * vh });
+  const fw = Math.hypot(P(454).x - P(234).x, P(454).y - P(234).y);
+  const a = P(133), b = P(362), oa = P(33), ob = P(263), la = P(145), lb = P(374);
+  const sgnA = Math.sign(oa.x - ob.x) || 1;
+  const zones = [
+    edge((a.x + b.x) / 2, (a.y + b.y) / 2, fw * 0.12, fw * 0.08),          // 코 다리
+    edge(oa.x + sgnA * fw * 0.10, oa.y, fw * 0.10, fw * 0.10),             // 관자놀이(다리)
+    edge(ob.x - sgnA * fw * 0.10, ob.y, fw * 0.10, fw * 0.10),
+    edge(la.x, la.y + fw * 0.065, fw * 0.18, fw * 0.045),                  // 눈 아래 테
+    edge(lb.x, lb.y + fw * 0.065, fw * 0.18, fw * 0.045),
+  ];
+  const ref = (edge(P(205).x, P(205).y, fw * 0.12, fw * 0.12) +
+               edge(P(425).x, P(425).y, fw * 0.12, fw * 0.12)) / 2;
+  const mean = zones.reduce((s, v) => s + v, 0) / zones.length;
+  return { score: mean / (ref + 3), fw };
+}
+
+/* ---------------- 트래킹 ---------------- */
+function track() {
+  if (!ready || video.readyState < 2 || video.currentTime === lastT) return;
+  lastT = video.currentTime;
+  const now = performance.now();
+  octx.drawImage(video, 0, 0, vw, vh);
+
+  // 1) 얼굴 + 안경
+  const fr = faceLm.detectForVideo(video, now);
+  // 가장 가까운(얼굴이 큰) 한 사람만 대상으로 삼음. 멀리 지나가는 사람은 무시
+  const cands = [];
+  for (const lm of (fr.faceLandmarks || [])) {
+    const fwN = Math.hypot((lm[454].x - lm[234].x) * vw, (lm[454].y - lm[234].y) * vh) / vw;
+    if (fwN < MIN_FACE) continue;
+    cands.push({ lm, fwN, cx: (lm[234].x + lm[454].x) / 2, cy: (lm[10].y + lm[152].y) / 2 });
+  }
+  const biggest = (arr) => arr.reduce((a, b) => (b.fwN > a.fwN ? b : a));
+  let target = cands.length ? biggest(cands) : null;
+  if (target && gActive && lastFace) {                              // 이미 잡은 사람은 계속 따라감
+    const close = cands.filter(c => Math.hypot(c.cx - lastFace.x, c.cy - lastFace.y) < 0.2);
+    if (close.length) target = biggest(close);
+  }
+  let best = null;
+  if (target) {
+    best = { ...glassesScore(target.lm), lm: target.lm };
+    lastFace = { x: target.cx, y: target.cy };
+  } else lastFace = null;
+  const raw = best ? best.score : 0;
+  gScore += (raw - gScore) * 0.25;
+  const wasActive = gActive;
+  gActive = forceGlasses || (gActive ? gScore > GLASSES_ON * GLASSES_OFF_RATIO : gScore > GLASSES_ON);
+
+  if (gActive && best) {
+    const lm = best.lm, nose = lm[1], top = lm[10], chin = lm[152], l = lm[234], r = lm[454];
+    lastYaw = ((nose.x - (l.x + r.x) / 2) * vw) / best.fw;           // 원본 영상 기준
+    lastPitch = (nose.y - top.y) / (chin.y - top.y);
+    if (!wasActive) { yawBase = lastYaw; pitchBase = lastPitch; }     // 등장 시점 = 정면으로 가정
+    headX = -(lastYaw - yawBase);          // 오른쪽으로 돌리면 +
+    headY = -(lastPitch - pitchBase);      // 위로 들면 +
+  } else { headX = 0; headY = 0; }
+
+  // 2) 손가락 (안경 쓴 사람이 있을 때만)
+  fingers = [];
+  if (gActive) {
+    const hr = handLm.detectForVideo(video, now);
+    const faceW = best ? best.fw / vw : 0;
+    for (const h of (hr.landmarks || [])) {
+      const span = Math.hypot((h[0].x - h[9].x) * vw, (h[0].y - h[9].y) * vh) / vw;   // 손 크기
+      if (faceW && span / faceW < MIN_HAND_RATIO) continue;                            // 멀리 있는 사람 손 무시
+      const t = h[8];                                  // 검지 끝
+      fingers.push({ x: (1 - t.x) * W, y: t.y * H });  // 거울 모드
+    }
+  }
+}
+
+/* ---------------- p5 ---------------- */
+const dead = (v, r) => { const n = v / r; return Math.abs(n) < DEADZONE / r ? 0 : Math.max(-1, Math.min(1, n)); };
+const uiY = (img) => H - UI_BOTTOM - img.height;                    // 아래 기준 배치
+
+let missing = [];                    // 못 불러온 파일 이름
+const L = (name) => loadImage(name, undefined, () => missing.push(name));
+function loadAll() {
+  bgImg = L("S1.jpg");
+  ui = [L("S1_1.svg"), L("S1_2.svg")];
+  s2Img = L("S2.png");
+  arrowImg = L("S2_1.svg");
+  s3Img = L("S3.png");
+  s3ui = [L("S3_1.svg"), L("S3_2.svg"), L("S3_3.svg")];
+  s4Img = L("S4.png");
+  s4ui = [L("S4_1.svg"), L("S4_2.svg"), L("S4_3.svg")];
+  s5Img = L("S5.png");
+  s5ui = [L("S5_1.svg"), L("S5_2.svg"), L("S5_3.svg")];
+}
+
+window.setup = function () {
+  loadAll();
+  sceneStart = millis();
+  createCanvas(windowWidth, windowHeight);
+  textFont("Apple SD Gothic Neo, Malgun Gothic, sans-serif");
+  init();
+};
+window.windowResized = () => resizeCanvas(windowWidth, windowHeight);
+
+window.draw = function () {
+  track();
+
+  // 목표 위치 계산 + 부드럽게
+  const sx = INVERT_X ? -1 : 1, sy = INVERT_Y ? -1 : 1;
+  const tx = gActive ? sx * dead(headX, YAW_RANGE) * MAX_X : 0;
+  const ty = gActive ? -sy * dead(headY, PITCH_RANGE) * MAX_Y : 0;
+  viewX += (tx - viewX) * SMOOTH;
+  viewY += (ty - viewY) * SMOOTH;
+
+  const now = millis();
+  const ease = (t) => t * t * (3 - 2 * t);
+
+  // UI 등장 알파
+  const aNew = stage === 0
+    ? ease(constrain((now - (uiStep === 0 ? sceneStart : uiStart) - (uiStep === 0 ? UI_DELAY : SWITCH_DELAY)) / UI_FADE, 0, 1))
+    : 0;
+  const a5 = (delay, t0) => ease(constrain((now - t0 - delay) / UI_FADE, 0, 1));
+  const aS5a = stage === 4 ? a5(UI_DELAY, s5Start) : 0;               // S5_1
+  const aS5b = stage === 4 ? (s5Step === 0 ? a5(UI_DELAY + 500, s5Start) : a5(SWITCH_DELAY, s5StepStart)) : 0;   // S5_2 / S5_3
+  const s5Y2 = S5_TOP + (s5ui[0] ? s5ui[0].height : 144) + S5_GAP;
+  const aS4 = stage === 3 ? ease(constrain((now - (s4Step === 0 ? s4Start : s4StepStart) - (s4Step === 0 ? UI_DELAY : SWITCH_DELAY)) / UI_FADE, 0, 1)) : 0;
+  const aS3 = (stage === 2 && s3Step === 0) ? ease(constrain((now - s3Start - UI_DELAY) / UI_FADE, 0, 1)) : 0;
+
+  // 버튼 근처 판정
+  let near = false;
+  if (stage === 0 && aNew > 0.8) {                                  // S1
+    const hz = HITS[uiStep], y0 = uiY(ui[uiStep]);
+    near = fingers.some(f =>
+      f.x > UI_X + hz.x - BTN_MARGIN && f.x < UI_X + hz.x + hz.w + BTN_MARGIN &&
+      f.y > y0 + hz.y - BTN_MARGIN && f.y < y0 + hz.y + hz.h + BTN_MARGIN);
+  } else if (stage === 4 && aS5b > 0.8 && !s5End) {                 // S5
+    const hz = S5_HITS[s5Step];
+    near = fingers.some(f =>
+      f.x > S5_X + hz.x - BTN_MARGIN && f.x < S5_X + hz.x + hz.w + BTN_MARGIN &&
+      f.y > s5Y2 + hz.y - BTN_MARGIN && f.y < s5Y2 + hz.y + hz.h + BTN_MARGIN);
+  } else if (stage === 3 && !s4Done && aS4 > 0.8) {                 // S4
+    const hz = S4_HITS[s4Step], y0 = uiY(s4ui[s4Step]);
+    near = fingers.some(f =>
+      f.x > S4_X + hz.x - BTN_MARGIN && f.x < S4_X + hz.x + hz.w + BTN_MARGIN &&
+      f.y > y0 + hz.y - BTN_MARGIN && f.y < y0 + hz.y + hz.h + BTN_MARGIN);
+  } else if (stage === 2 && s3Step === 0 && aS3 > 0.8) {           // S3: 안내 시작 버튼
+    const k = s3ui[0].width / S3_GO_REF_W;
+    const x0 = (W - s3ui[0].width) / 2 + S3_GO.x * k, y0 = uiY(s3ui[0]) + S3_GO.y * k;
+    near = fingers.some(f =>
+      f.x > x0 - BTN_MARGIN && f.x < x0 + S3_GO.w * k + BTN_MARGIN &&
+      f.y > y0 - BTN_MARGIN && f.y < y0 + S3_GO.h * k + BTN_MARGIN);
+  } else if (stage === 1) {                                         // S2: 지갑 (배경 좌표로 환산)
+    near = fingers.some(f => {
+      const bx = f.x + MAX_X + viewX, by = f.y + MAX_Y + viewY;
+      return Math.abs(bx - WALLET.x) < WALLET.w / 2 + WALLET_MARGIN &&
+             Math.abs(by - WALLET.y) < WALLET.h / 2 + WALLET_MARGIN;
+    });
+  }
+  if (near) {
+    if (!inside) { inside = true; holdStart = now; }
+    if (now - holdStart >= HOLD_MS && now - lastClick > COOLDOWN_MS) {
+      lastClick = now; advance(); inside = false;
+    }
+  } else inside = false;
+
+  // 자동 전환들
+  if (stage === 1 && now - s2Start > S2_AUTO_MS) { lastClick = now; advance(); }   // S2: 시간 지나면 자동
+  if (stage === 2 && s3Step === 1 && now - s3T0 > WALK_BEGIN + WALK_STEPS * STEP_MS + 400) {   // 걷기 끝 → S4
+    stage = 3; s4Start = millis(); s4Step = 0;
+  }
+  if (stage === 3 && s4Done && now - s4Done > S4_WAIT_MS) { stage = 4; s5Start = millis(); s5Step = 0; }   // S4 끝 → S5
+  if (stage === 4 && s5End && now - s5End > END_PAUSE + END_FADE_OUT) {   // 완전히 어두워진 순간 첫 화면으로
+    resetAll(); fadeInStart = now; lastClick = now;
+  }
+
+  // ---- 그리기 (5120x2880 좌표계를 창 크기에 맞춰 축소) ----
+  background(0);
+  const s = Math.min(width / W, height / H);
+  push();
+  translate((width - W * s) / 2, (height - H * s) / 2);
+  scale(s);
+  drawingContext.save();
+  drawingContext.beginPath(); drawingContext.rect(0, 0, W, H); drawingContext.clip();
+
+  // 배경 (이동하는 레이어)
+  let wz = 1, wy = 0;                                               // S3 걷는 느낌: 확대(위 잘림) + 위아래 흔들림
+  if (stage === 2 && s3Step === 1) {
+    const p = constrain((now - s3T0 - WALK_BEGIN) / (WALK_STEPS * STEP_MS), 0, 1);
+    const env = Math.min(1, p * 6, (1 - p) * 6);
+    wz = 1 + WALK_ZOOM * ease(p);
+    wy = WALK_BOB * env * Math.sin(2 * Math.PI * WALK_STEPS * p);
+  }
+  push();
+  if (stage === 2) { translate(0, wy); translate(W / 2, H); scale(wz); translate(-W / 2, -H); }
+  translate(-(MAX_X + viewX), -(MAX_Y + viewY));
+  noStroke();
+  if (stage === 0) {
+    image(bgImg, 0, 0, BG_W, BG_H);                                 // S1.jpg
+  } else if (stage === 1) {
+    image(s2Img, 0, 0, BG_W, BG_H);                                 // S2.png
+    // 지갑 초록 표시 + 화살표 (배경과 함께 움직임)
+    const a2 = ease(constrain((now - s2Start - 800) / UI_FADE, 0, 1));
+    const pulse = 0.5 + 0.5 * Math.sin(now / 260);
+    const bw = WALLET.w, bh = WALLET.h;
+    strokeWeight(14); stroke(40, 210, 100, a2 * (170 + 85 * pulse));
+    fill(40, 210, 100, a2 * (inside ? 90 : 25));
+    rect(WALLET.x - bw / 2, WALLET.y - bh / 2, bw, bh, 50);
+    tint(255, a2 * 255);
+    image(arrowImg, WALLET.x - ARROW_TIP_X, WALLET.y - bh / 2 - ARROW_GAP - ARROW_BOTTOM + Math.sin(now / 300) * 14);
+    noTint();
+  } else if (stage === 2) {
+    image(s3Img, 0, 0, BG_W, BG_H);                                 // S3.png
+    if (s3Step === 1) {                                             // 길안내: 아래에서 위로 스르륵
+      const r = ease(constrain((now - s3T0 - PATH_START) / PATH_REVEAL, 0, 1));
+      if (r > 0) drawGuidePath(r);
+    }
+  } else if (stage === 3) {
+    image(s4Img, 0, 0, BG_W, BG_H);                                 // S4.png
+  } else if (stage === 4) {
+    image(s5Img, 0, 0, BG_W, BG_H);                                 // S5.png
+  }
+  pop();
+
+  // 고정 UI (움직이지 않음, 서서히 등장)
+  if (stage === 0) {
+    if (prevStep >= 0) {                                            // 이전 UI 사라지는 중
+      const ap = 1 - constrain((now - prevStart) / UI_FADE_OUT, 0, 1);
+      if (ap <= 0) prevStep = -1; else { tint(255, ap * 255); image(ui[prevStep], UI_X, uiY(ui[prevStep])); }
+    }
+    if (aNew > 0) { tint(255, aNew * 255); image(ui[uiStep], UI_X, uiY(ui[uiStep]) + (1 - aNew) * 30); }
+    noTint();
+  } else if (stage === 2) {
+    const a1 = s3Step === 0 ? aS3 : 1 - constrain((now - s3T0) / UI_FADE_OUT, 0, 1);
+    if (a1 > 0) {                                                   // S3_1: 집으로 안내할까요? (하단 중앙)
+      tint(255, a1 * 255);
+      image(s3ui[0], (W - s3ui[0].width) / 2, uiY(s3ui[0]) + (s3Step === 0 ? (1 - a1) * 30 : 0));
+    }
+    if (s3Step === 1) {                                             // S3_2 (상단 중앙), S3_3 (상단 오른쪽)
+      const a2 = ease(constrain((now - s3T0 - 250) / UI_FADE, 0, 1));
+      if (a2 > 0) {
+        tint(255, a2 * 255);
+        image(s3ui[1], (W - s3ui[1].width) / 2, S3_TOP - (1 - a2) * 30);
+        image(s3ui[2], W - S3_RIGHT - s3ui[2].width, S3_TOP - (1 - a2) * 30);
+      }
+    }
+    noTint();
+  } else if (stage === 3) {                                         // S4: 도어락 UI
+    if (s4Prev >= 0) {
+      const ap = 1 - constrain((now - s4PrevStart) / UI_FADE_OUT, 0, 1);
+      if (ap <= 0) s4Prev = -1; else { tint(255, ap * 255); image(s4ui[s4Prev], S4_X, uiY(s4ui[s4Prev])); }
+    }
+    if (aS4 > 0) { tint(255, aS4 * 255); image(s4ui[s4Step], S4_X, uiY(s4ui[s4Step]) + (1 - aS4) * 30); }
+    noTint();
+  } else if (stage === 4) {                                         // S5: 요리 UI
+    if (aS5a > 0) { tint(255, aS5a * 255); image(s5ui[0], S5_X, S5_TOP - (1 - aS5a) * 30); }
+    if (s5PrevStart >= 0) {                                         // S5_2 사라지는 중
+      const ap = 1 - constrain((now - s5PrevStart) / UI_FADE_OUT, 0, 1);
+      if (ap <= 0) s5PrevStart = -1; else { tint(255, ap * 255); image(s5ui[1], S5_X, s5Y2); }
+    }
+    if (aS5b > 0) { tint(255, aS5b * 255); image(s5ui[1 + s5Step], S5_X, s5Y2 - (1 - aS5b) * 30); }
+    noTint();
+  }
+
+  if (missing.length) {                                             // 파일 못 불러옴 경고
+    noStroke(); fill(200, 0, 0, 220); rect(100, 100, W - 200, 130, 30);
+    fill(255); textAlign(CENTER, CENTER); textSize(48);
+    text("불러오지 못한 파일: " + missing.join(", "), W / 2, 165);
+  }
+
+  // 대기 문구: 정중앙, 작은 글씨 (안경 인식되면 서서히 사라짐)
+  msgA += ((gActive && !status ? 0 : 1) - msgA) * 0.12;
+  if (msgA > 0.01) {
+    const msg = status || "비치된 스마트 글라스를 착용 후 앞에 서주세요.";
+    textAlign(CENTER, CENTER); textSize(58); noStroke();
+    const tw = textWidth(msg), bw = tw + 160, bh = 150;
+    fill(0, 200 * msgA); rect(W / 2 - bw / 2, H / 2 - bh / 2, bw, bh, bh / 2);
+    fill(255, 255 * msgA); text(msg, W / 2, H / 2 - 4);
+  }
+
+  // 손가락 포인터
+  for (const f of fingers) { noFill(); stroke(255, 0, 80); strokeWeight(5); circle(f.x, f.y, 110); }
+  drawingContext.restore();
+  pop();
+
+  // 암전 오버레이 (0 투명 ~ 1 검정)
+  let fa = 0;
+  if (s5End) fa = constrain((now - s5End - END_PAUSE) / END_FADE_OUT, 0, 1);
+  else if (fadeInStart) { fa = 1 - constrain((now - fadeInStart) / END_FADE_IN, 0, 1); if (fa <= 0) fadeInStart = 0; }
+  if (fa > 0) { noStroke(); fill(0, fa * 255); rect(0, 0, width, height); }
+
+  if (debug) drawCamera();
+};
+
+// 길안내: 소실점 방향으로 좁아지는 직선, 아래→위로 드러남, 양끝은 투명
+function drawGuidePath(r) {
+  const c = drawingContext, D0 = PATH.by - VP.y, dT = PATH.endY - VP.y;
+  const hw = PATH.wb / 2, Xc = PATH.bx - VP.x;
+  const P = (X, d) => [VP.x + X * d / D0, VP.y + d];                // 바닥 좌표 → 화면(배경) 좌표
+  const pts = [P(Xc + hw, D0), P(Xc + hw, dT), P(Xc - hw, dT), P(Xc - hw, D0)];
+  const top = VP.y + dT, bot = PATH.by;
+  const g = c.createLinearGradient(0, bot, 0, top);
+  g.addColorStop(0, `rgba(${PATH_RGB},0)`); g.addColorStop(0.3, `rgba(${PATH_RGB},${PATH_ALPHA})`);
+  g.addColorStop(0.72, `rgba(${PATH_RGB},${PATH_ALPHA})`); g.addColorStop(1, `rgba(${PATH_RGB},0)`);
+  c.save();
+  c.beginPath(); c.rect(0, top + (bot - top) * (1 - r) - 5, BG_W, bot - top);   // 아래에서 위로 드러남
+  c.clip();
+  c.globalAlpha = Math.min(1, r * 3);
+  c.fillStyle = g; c.beginPath();
+  pts.forEach(([x, y], i) => i ? c.lineTo(x, y) : c.moveTo(x, y));
+  c.closePath(); c.fill();
+  c.restore();
+}
+
+function resetAll() {
+  stage = 0; uiStep = 0; prevStep = -1; s3Step = 0; s4Step = 0; s4Prev = -1; s4Done = 0;
+  s5Step = 0; s5PrevStart = -1; s5End = 0; sceneStart = millis(); inside = false;
+}
+
+function advance() {
+  if (stage === 0) {
+    if (uiStep === 0) { prevStep = 0; prevStart = millis(); uiStep = 1; uiStart = millis(); }
+    else { stage = 1; s2Start = millis(); }                         // 지갑 찾기 → S2
+  } else if (stage === 1) { stage = 2; s3Start = millis(); s3Step = 0; }   // S2 → S3
+  else if (stage === 2) {
+    if (s3Step === 0) { s3Step = 1; s3T0 = millis(); }              // 안내 시작 → 길안내
+    else { stage = 3; s4Start = millis(); s4Step = 0; }             // (테스트용) 건너뛰기
+  } else if (stage === 3) {
+    if (s4Step < 2) { s4Prev = s4Step; s4PrevStart = millis(); s4Step++; s4StepStart = millis(); }
+    else if (!s4Done) s4Done = millis();                            // S4_3 → 잠시 대기 후 다음 장면
+  } else if (stage === 4) {
+    if (s5Step === 0) { s5PrevStart = millis(); s5Step = 1; s5StepStart = millis(); }   // S5_2 → S5_3
+    else if (!s5End) s5End = millis();                              // S5_3 → 대기 → 페이드아웃 → 첫 화면
+  }
+}
+
+// 우측 하단 카메라 미리보기 (글자 없음, 둥근 모서리)
+function drawCamera() {
+  const w = 160, h = 90, r = 8, m = 40, x = width - w - m, y = height - h - m;
+  const c = drawingContext;
+  const rr = () => { c.beginPath(); c.roundRect ? c.roundRect(x, y, w, h, r) : c.rect(x, y, w, h); };
+  c.save();
+  c.shadowColor = "rgba(0,0,0,0.35)"; c.shadowBlur = 24; c.shadowOffsetY = 6;
+  c.fillStyle = "#111"; rr(); c.fill();                              // 그림자 + 바탕
+  c.shadowColor = "transparent"; c.shadowBlur = 0; c.shadowOffsetY = 0;
+  rr(); c.clip();
+  c.translate(x + w, y); c.scale(-1, 1);                             // 거울 모드
+  if (video.readyState >= 2) c.drawImage(video, 0, 0, w, h);
+  c.restore();
+  c.save();
+  c.strokeStyle = "rgba(255,255,255,0.75)"; c.lineWidth = 2; rr(); c.stroke();   // 테두리
+  c.fillStyle = gActive ? "rgb(70,220,120)" : "rgba(255,255,255,0.55)";         // 안경 인식 표시 점
+  c.beginPath(); c.arc(x + 16, y + 16, 3.5, 0, Math.PI * 2); c.fill();
+  c.restore();
+}
+
+window.keyPressed = function () {
+  if (key === "d") debug = !debug;                                  // 카메라 미리보기 켜기/끄기
+  if (key === "c") { yawBase = lastYaw; pitchBase = lastPitch; }    // 현재 자세를 정면으로
+  if (key === "r") resetAll();
+  if (key === "n") advance();                                       // 테스트: 클릭 대신
+  if (key === "g") forceGlasses = !forceGlasses;                    // 테스트: 안경 강제 ON
+  if (key === "[") GLASSES_ON = Math.max(0.5, GLASSES_ON - 0.1);    // 안경 인식 더 쉽게
+  if (key === "]") GLASSES_ON += 0.1;                               // 안경 인식 더 엄격하게
+  if (key === "f") fullscreen(!fullscreen());
+};
+</script>
+</body>
+</html>
